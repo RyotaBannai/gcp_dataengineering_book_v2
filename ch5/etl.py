@@ -1,30 +1,53 @@
-# ETL処理を実施するBeamパイプラインが定義されたソースコード、etl.py
+"""
+ETL処理を実施するBeamパイプライン
 
-# リスト5-1. 各種Pythonモジュールのインポート
+前提条件:
+- gcloudコマンドが使える
+- gcloud auth login # ログイン
+- gcloud auth application-default login # ADCを取得
+- uv add apache-beam 'apache-beam[gcp]' 'apache-beam[tfrecord]' # 必要packageをinstall
+
+実行コマンド(ローカル環境で実行):
+PROJECT_ID=$(gcloud config get-value project)
+uv run python ch5/etl.py \
+--region us-central1 \
+--dt 20181001 \
+--runner DataflowRunner \
+--project $PROJECT_ID \
+--temp_location gs://PROJECT_ID-gcpbook-ch05/tmp/ \
+--experiments shuffle_mode=service
+
+"""
+
 import argparse
 import json
 import logging
 
 import apache_beam as beam
 from apache_beam.io import ReadFromText
-from apache_beam.options.pipeline_options import GoogleCloudOptions
-from apache_beam.options.pipeline_options import PipelineOptions
+from apache_beam.options.pipeline_options import GoogleCloudOptions, PipelineOptions
 
-
-# リスト5-2. 変数_DAU_TABLE_SCHEMAの定義
+# 変数_DAU_TABLE_SCHEMAの定義
 # 書き込み先のBigQueryのテーブルgcpbook_ch5.dauのスキーマ定義
 _DAU_TABLE_SCHEMA = {
-    'fields': [
-        {'name': 'dt', 'type': 'date', 'mode': 'required'},
-        {'name': 'paid_users', 'type': 'int64', 'mode': 'required'},
-        {'name': 'free_to_play_users', 'type': 'int64', 'mode': 'required'}
+    "fields": [
+        {"name": "dt", "type": "date", "mode": "required"},
+        {"name": "paid_users", "type": "int64", "mode": "required"},
+        {"name": "free_to_play_users", "type": "int64", "mode": "required"},
     ]
 }
 
+# スクリプト固有値
+_DATASET = "gcpbook_ch5_table"
+_USER_TABLE = f"{_DATASET}.users"
+_DAU_TABLE = f"{_DATASET}.dau"
+_GCS_PATH = "gs://{}-gcpbook-ch05/data/events/{}/*.json.gz"
 
-# リスト5-3. クラスCountUsersFnの定義
+
+# クラスCountUsersFnの定義
 class CountUsersFn(beam.CombineFn):
     """課金ユーザと無課金ユーザの人数を集計する。"""
+
     def create_accumulator(self):
         """課金ユーザと無課金ユーザの人数を保持するaccumulatorを作成して返却する。
 
@@ -75,91 +98,88 @@ class CountUsersFn(beam.CombineFn):
 
 def run():
     """メイン処理のエントリポイント。パイプラインを定義して実行する。"""
-    # リスト5-4. コマンドライン引数のパースと変数の設定
     # コマンドライン引数をパースして、パイプライン実行用のオプションを生成する。
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        '--dt',
-        dest='dt',
-        help='event date')
+    parser.add_argument("--dt", dest="dt", help="event date")
     known_args, pipeline_args = parser.parse_known_args()
     pipeline_options = PipelineOptions(pipeline_args)
 
     # ファイル読み取り対象のCloud Storageのパスを組み立てる。
-    event_file_path = 'gs://{}-gcpbook-ch5/data/events/{}/*.json.gz'.format(
-        pipeline_options.view_as(GoogleCloudOptions).project, known_args.dt)
+    event_file_path = _GCS_PATH.format(
+        pipeline_options.view_as(GoogleCloudOptions).project,
+        known_args.dt,
+    )
+    print(">>> debug")
+    print(f"{pipeline_options.view_as(GoogleCloudOptions).project=}")
+    print(f"{event_file_path=}")
     # 処理対象のイベント日付を"YYYY-MM-DD"形式で組み立てる。
-    dt = '{}-{}-{}'.format(known_args.dt[0:4], known_args.dt[4:6],
-                           known_args.dt[6:8])
+    dt = "{}-{}-{}".format(known_args.dt[0:4], known_args.dt[4:6], known_args.dt[6:8])
 
     # パイプラインを定義して実行する。
     with beam.Pipeline(options=pipeline_options) as p:
-        # リスト5-5. user_pseudo_idの一覧の抽出
-        # Cloud Storage からユーザ行動ログを読み取り、user_pseudo_idの一覧を
-        # 抽出する。
+        # Cloud Storage からユーザ行動ログを読み取り、user_pseudo_idの一覧を抽出する。
         user_pseudo_ids = (
             p
             # Cloud Storage からユーザ行動ログを読み取る。
-            | 'Read Events' >> ReadFromText(event_file_path)
+            | "Read Events" >> ReadFromText(event_file_path)
             # JSON 形式のデータをパースしてuser_pseudo_idを抽出する。
-            | 'Parse Events' >> beam.Map(
-                lambda event: json.loads(event).get('user_pseudo_id'))
+            | "Parse Events"
+            >> beam.Map(lambda event: json.loads(event).get("user_pseudo_id"))
             # 重複しているuser_pseudo_idを排除する。
-            | 'Deduplicate User Pseudo Ids' >> beam.Distinct()
+            | "Deduplicate User Pseudo Ids" >> beam.Distinct()
             # 後続の結合処理で必要となるため、キー・バリュー形式にデータを変換する。
             # user_pseudo_idをキーとし、値は使用しないためNoneとする。
-            | 'Transform to KV' >> beam.Map(
-                lambda user_pseudo_id: (user_pseudo_id, None))
+            | "Transform to KV"
+            >> beam.Map(lambda user_pseudo_id: (user_pseudo_id, None))
         )
 
-        # リスト5-6. ユーザ情報の一覧の取得
-        # BigQueryのユーザ情報を保管するテーブルgcpbook_ch5.usersからユーザ情報の
-        # 一覧を取得する。
+        # BigQueryのユーザ情報を保管するテーブルgcpbook_ch5.usersからユーザ情報の一覧を取得する。
         users = (
             p
             # BigQueryのユーザ情報を保管するテーブルgcpbook_ch5.usersからデータを
             # 読み取る。
-            | 'Read Users' >> beam.io.Read(
-                beam.io.BigQuerySource('gcpbook_ch5.users'))
+            | "Read Users" >> beam.io.Read(beam.io.BigQuerySource(_USER_TABLE))
             # 後続の結合処理で必要となるため、キー・バリュー形式にデータを変換する。
             # user_pseudo_idをキーとし、「課金ユーザであるか否か」を表す
             # is_paid_userを値とする。
-            | 'Transform Users' >> beam.Map(
-                lambda user: (user['user_pseudo_id'], user['is_paid_user']))
+            | "Transform Users"
+            >> beam.Map(lambda user: (user["user_pseudo_id"], user["is_paid_user"]))
         )
 
-        # リスト5-7. データの結合結果のテーブルへの書き込み
         # 前工程で作成した2つのPCollection user_pseudo_idsとusersを結合し、
         # 集計して、課金ユーザと無課金ユーザそれぞれの人数を算出して、その結果をBigQuery
         # のテーブルgcpbook_ch5.dauへ書き込む。
         (
-            {'user_pseudo_ids': user_pseudo_ids, 'users': users}
+            {"user_pseudo_ids": user_pseudo_ids, "users": users}
             # user_pseudo_idsとusersを結合する。
-            | 'Join' >> beam.CoGroupByKey()
+            | "Join" >> beam.CoGroupByKey()
             # ユーザ行動ログが存在するユーザ情報のみを抽出する。
-            | 'Filter Users with Events' >> beam.Filter(
-                lambda row: len(row[1]['user_pseudo_ids']) > 0)
+            | "Filter Users with Events"
+            >> beam.Filter(lambda row: len(row[1]["user_pseudo_ids"]) > 0)
             # 「課金ユーザであるか否か」を表すフラグ値を抽出する。
-            | 'Transform to Is Paid User' >> beam.Map(
-                lambda row: row[1]['users'][0])
+            | "Transform to Is Paid User" >> beam.Map(lambda row: row[1]["users"][0])
             # 課金ユーザと無課金ユーザそれぞれの人数を算出する。
-            | 'Count Users' >> beam.CombineGlobally(CountUsersFn())
+            | "Count Users" >> beam.CombineGlobally(CountUsersFn())
             # BigQueryのテーブルへ書き込むためのデータを組み立てる。
-            | 'Create a Row to BigQuery' >> beam.Map(
+            | "Create a Row to BigQuery"
+            >> beam.Map(
                 lambda user_nums: {
-                    'dt': dt,
-                    'paid_users': user_nums[0],
-                    'free_to_play_users': user_nums[1]
-                })
+                    "dt": dt,
+                    "paid_users": user_nums[0],
+                    "free_to_play_users": user_nums[1],
+                }
+            )
             # BigQueryのテーブルgcpbook_ch5.dauへ算出結果を書き込む。
-            | 'Write a Row to BigQuery' >> beam.io.WriteToBigQuery(
-                'gcpbook_ch5.dau',
+            | "Write a Row to BigQuery"
+            >> beam.io.WriteToBigQuery(
+                _DAU_TABLE,
                 schema=_DAU_TABLE_SCHEMA,
                 write_disposition=beam.io.BigQueryDisposition.WRITE_APPEND,
-                create_disposition=beam.io.BigQueryDisposition.CREATE_IF_NEEDED)
+                create_disposition=beam.io.BigQueryDisposition.CREATE_IF_NEEDED,
+            )
         )
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     logging.getLogger().setLevel(logging.INFO)
     run()

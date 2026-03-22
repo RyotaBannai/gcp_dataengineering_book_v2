@@ -1,0 +1,11 @@
+[project]
+name = "gcp-dataengineering-book-v2"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "apache-beam[gcp,tfrecord]>=2.70.0",
+    "pyspark>=4.1.1",
+    "ruff>=0.15.7",
+]
